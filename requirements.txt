@@ -1,2 +1,4 @@
 appengine-python-standard>=1.0.0
 google-cloud-storage
+google-cloud-vision
+pandas
