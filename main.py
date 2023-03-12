@@ -5,6 +5,9 @@ import pandas as pd
 import json
 import re
 
+from gpt_index import SimpleDirectoryReader, GPTListIndex, readers, GPTSimpleVectorIndex, LLMPredictor, PromptHelper
+from langchain import OpenAI
+
 
 # Triggered by a change in a storage bucket
 @functions_framework.cloud_event
@@ -28,6 +31,23 @@ def parse_bucket(cloud_event):
     print(f"Created: {timeCreated}")
     print(f"Updated: {updated}")
 
+    input_name = name.split("/")
+    user_dir_name = input_name[0]
+    resource_dir_name = input_name[1]
+    file_name = input_name[2]
+    print("User dir name: " + user_dir_name)
+    print("Resource dir name: " + resource_dir_name)
+ 
+    if resource_dir_name != "input": 
+        return
+
+    gs_input_file_URI = f"gs://{bucket}/{name}"
+    print("Input file URI: " + gs_input_file_URI)
+    gs_ocr_results_URI = f"gs://{bucket}/{user_dir_name}/ocr_results/"
+    print("OCR dest URI: " + gs_ocr_results_URI)
+    gs_index_destination_URI = f"gs://{bucket}/{user_dir_name}/index/"
+    print("Index destination URI: " + gs_index_destination_URI)
+
     storage_client = storage.Client()
     bucket_obj = storage_client.bucket(bucket) # email-attachment-test is defined in deploy file
     blob = bucket_obj.get_blob(name)
@@ -46,8 +66,10 @@ def parse_bucket(cloud_event):
             df = pd.read_csv(s)
             print(df)
         case "pdf":
-            async_detect_document("gs://email-attachment-test/mikefisher/Michael_Fisher_bio.pdf", "gs://email-attachment-test/mikefisher/ocr_results/")
-            write_to_text("gs://email-attachment-test/mikefisher/ocr_results/")
+            # async_detect_document("gs://email-attachment-test/mikefisher/Michael_Fisher_bio.pdf", "gs://email-attachment-test/mikefisher/ocr_results/")
+            async_detect_document(gs_input_file_URI, gs_ocr_results_URI)
+            # write_to_text("gs://email-attachment-test/mikefisher/ocr_results/")
+            write_to_text(gs_ocr_results_URI)
         case _:
             print(f"File type not handled")
  
@@ -121,4 +143,46 @@ def write_to_text(gcs_destination_uri):
     print('Full text:\n')
     print(annotation['text'])
 
+def construct_index(gcs_uri):
+    # set maximum input size
+    max_input_size = 4096
+    # set number of output tokens
+    num_outputs = 256
+    # set maximum chunk overlap
+    max_chunk_overlap = 20
+    # set chunk size limit
+    chunk_size_limit = 600
 
+    # define LLM
+    llm_predictor = LLMPredictor(llm=OpenAI(temperature=0, model_name="text-davinci-003", max_tokens=num_outputs))
+    prompt_helper = PromptHelper(max_input_size, num_outputs, max_chunk_overlap, chunk_size_limit=chunk_size_limit)
+ 
+
+
+    storage_client = storage.Client()
+
+    match = re.match(r'gs://([^/]+)/(.+)', gcs_uri)
+    bucket_name = match.group(1)
+    prefix = match.group(2)
+
+    bucket = storage_client.get_bucket(bucket_name)
+
+    blob_list = [blob for blob in list(bucket.list_blobs(
+        prefix=prefix)) if not blob.name.endswith('/')]
+    print('Output files:')
+    for blob in blob_list:
+        print(blob.name)
+        documents = documents + blob.download_as_string()
+
+
+    # documents = SimpleDirectoryReader(directory_path).load_data()
+    
+    index = GPTSimpleVectorIndex(
+        documents, llm_predictor=llm_predictor, prompt_helper=prompt_helper)
+
+    # index.save_to_disk('index.json')
+    # return index
+
+    blob = bucket.blob("index.json")
+    with blob.open("w") as f:
+        f.write(index)
