@@ -4,9 +4,14 @@ from google.cloud import vision
 import pandas as pd
 import json
 import re
+import os
+from datetime import datetime
 
-from gpt_index import SimpleDirectoryReader, GPTListIndex, readers, GPTSimpleVectorIndex, LLMPredictor, PromptHelper
+from llama_index import Document, GPTListIndex, readers, GPTSimpleVectorIndex, LLMPredictor, PromptHelper
 from langchain import OpenAI
+import openai
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
 # Triggered by a change in a storage bucket
@@ -45,8 +50,10 @@ def parse_bucket(cloud_event):
     print("Input file URI: " + gs_input_file_URI)
     gs_ocr_results_URI = f"gs://{bucket}/{user_dir_name}/ocr_results/"
     print("OCR dest URI: " + gs_ocr_results_URI)
-    gs_index_destination_URI = f"gs://{bucket}/{user_dir_name}/index/"
-    print("Index destination URI: " + gs_index_destination_URI)
+    gs_index_results_URI = f"gs://{bucket}/{user_dir_name}/index_results/"
+    print("Index results URI: " + gs_index_results_URI)
+    gs_index_source_URI = f"gs://{bucket}/{user_dir_name}/index_source/"
+    print("Index source URI: " + gs_index_source_URI)
 
     storage_client = storage.Client()
     bucket_obj = storage_client.bucket(bucket) # email-attachment-test is defined in deploy file
@@ -59,20 +66,26 @@ def parse_bucket(cloud_event):
     
     match file_ext:
         case "txt":
-            print(bt)
+            # print(bt)
+            new_name = f"{user_dir_name}/index_source/{file_name}"
+            copy_blob(bucket, name, bucket, new_name,)
+            delete_blob(bucket, name)            
         case "csv":
             s = str(bt, "utf-8")
             s = StringIO(s)
             df = pd.read_csv(s)
             print(df)
         case "pdf":
-            # async_detect_document("gs://email-attachment-test/mikefisher/Michael_Fisher_bio.pdf", "gs://email-attachment-test/mikefisher/ocr_results/")
-            async_detect_document(gs_input_file_URI, gs_ocr_results_URI)
-            # write_to_text("gs://email-attachment-test/mikefisher/ocr_results/")
-            write_to_text(gs_ocr_results_URI)
+            # async_detect_document(gs_input_file_URI, gs_ocr_results_URI)
+            async_detect_document(gs_input_file_URI, gs_index_source_URI)
+            # write_to_text(gs_ocr_results_URI)
+            delete_blob(bucket, name)
         case _:
             print(f"File type not handled")
- 
+
+    # build index
+    construct_index(gs_index_source_URI, gs_index_results_URI)
+
 
 def async_detect_document(gcs_source_uri, gcs_destination_uri):
     """OCR with PDF/TIFF as source files on GCS"""
@@ -143,7 +156,8 @@ def write_to_text(gcs_destination_uri):
     print('Full text:\n')
     print(annotation['text'])
 
-def construct_index(gcs_uri):
+
+def construct_index(gcs_uri_input, gcs_uri_output):
     # set maximum input size
     max_input_size = 4096
     # set number of output tokens
@@ -157,32 +171,106 @@ def construct_index(gcs_uri):
     llm_predictor = LLMPredictor(llm=OpenAI(temperature=0, model_name="text-davinci-003", max_tokens=num_outputs))
     prompt_helper = PromptHelper(max_input_size, num_outputs, max_chunk_overlap, chunk_size_limit=chunk_size_limit)
  
-
-
     storage_client = storage.Client()
 
-    match = re.match(r'gs://([^/]+)/(.+)', gcs_uri)
+    # find input bucket info
+    match = re.match(r'gs://([^/]+)/(.+)', gcs_uri_input)
     bucket_name = match.group(1)
     prefix = match.group(2)
 
+    print("bucket_name: " + bucket_name)
+    print("prefix: " + prefix)
+
     bucket = storage_client.get_bucket(bucket_name)
 
+
+    # read through input files and create a list of text/str objects
     blob_list = [blob for blob in list(bucket.list_blobs(
         prefix=prefix)) if not blob.name.endswith('/')]
-    print('Output files:')
+    print("Full List of Input: ")
+    text_list = []
     for blob in blob_list:
         print(blob.name)
-        documents = documents + blob.download_as_string()
+        # documents = documents + blob.download_as_string().decode()
+        text_list.append(blob.download_as_string().decode())
+        delete_blob(bucket_name, blob.name)
 
+    # combine text list into document
+    documents = [Document(t) for t in text_list]
 
-    # documents = SimpleDirectoryReader(directory_path).load_data()
-    
+    # find output bucket info
+    match = re.match(r'gs://([^/]+)/(.+)', gcs_uri_output)
+    output_bucket_name = match.group(1)
+    output_prefix = match.group(2)
+    output_bucket = storage_client.get_bucket(output_bucket_name)
+
+    # create datetime stamped output file
+    output_blob = output_bucket.blob(f"{output_prefix}index_{datetime.now():%Y-%m-%d_%H:%M:%S}.json")
     index = GPTSimpleVectorIndex(
         documents, llm_predictor=llm_predictor, prompt_helper=prompt_helper)
 
-    # index.save_to_disk('index.json')
-    # return index
+    index_str = index.save_to_string()
+    output_blob.upload_from_string(index_str)
 
-    blob = bucket.blob("index.json")
-    with blob.open("w") as f:
-        f.write(index)
+
+def copy_blob(
+    bucket_name, blob_name, destination_bucket_name, destination_blob_name,
+):
+    """Copies a blob from one bucket to another with a new name."""
+    # bucket_name = "your-bucket-name"
+    # blob_name = "your-object-name"
+    # destination_bucket_name = "destination-bucket-name"
+    # destination_blob_name = "destination-object-name"
+
+    storage_client = storage.Client()
+
+    source_bucket = storage_client.bucket(bucket_name)
+    source_blob = source_bucket.blob(blob_name)
+    destination_bucket = storage_client.bucket(destination_bucket_name)
+
+
+    # Optional: set a generation-match precondition to avoid potential race conditions
+    # and data corruptions. The request to copy is aborted if the object's
+    # generation number does not match your precondition. For a destination
+    # object that does not yet exist, set the if_generation_match precondition to 0.
+    # If the destination object already exists in your bucket, set instead a
+    # generation-match precondition using its generation number.
+    # There is also an `if_source_generation_match` parameter, which is not used in this example.
+    destination_generation_match_precondition = 0
+
+    if destination_bucket.blob(destination_blob_name).exists():
+        return()
+
+    blob_copy = source_bucket.copy_blob(
+        source_blob, destination_bucket, destination_blob_name, if_generation_match=destination_generation_match_precondition,
+    )
+
+    print(
+        "Blob {} in bucket {} copied to blob {} in bucket {}.".format(
+            source_blob.name,
+            source_bucket.name,
+            blob_copy.name,
+            destination_bucket.name,
+        )
+    )
+
+def delete_blob(bucket_name, blob_name):
+    """Deletes a blob from the bucket."""
+    # bucket_name = "your-bucket-name"
+    # blob_name = "your-object-name"
+
+    storage_client = storage.Client()
+
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    generation_match_precondition = None
+
+    # Optional: set a generation-match precondition to avoid potential race conditions
+    # and data corruptions. The request to delete is aborted if the object's
+    # generation number does not match your precondition.
+    blob.reload()  # Fetch blob metadata to use in generation_match_precondition.
+    generation_match_precondition = blob.generation
+
+    blob.delete(if_generation_match=generation_match_precondition)
+
+    print(f"Blob {blob_name} deleted.")
