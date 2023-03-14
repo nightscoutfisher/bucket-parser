@@ -168,7 +168,8 @@ def construct_index(gcs_uri_input, gcs_uri_output):
     chunk_size_limit = 600
 
     # define LLM
-    llm_predictor = LLMPredictor(llm=OpenAI(temperature=0, model_name="text-davinci-003", max_tokens=num_outputs))
+    model_name = "text-embedding-ada-002" # "text-davinci-003"
+    llm_predictor = LLMPredictor(llm=OpenAI(temperature=0, model_name=model_name, max_tokens=num_outputs))
     prompt_helper = PromptHelper(max_input_size, num_outputs, max_chunk_overlap, chunk_size_limit=chunk_size_limit)
  
     storage_client = storage.Client()
@@ -205,9 +206,20 @@ def construct_index(gcs_uri_input, gcs_uri_output):
     output_bucket = storage_client.get_bucket(output_bucket_name)
 
     # create datetime stamped output file
-    output_blob = output_bucket.blob(f"{output_prefix}index_{datetime.now():%Y-%m-%d_%H:%M:%S}.json")
-    index = GPTSimpleVectorIndex(
-        documents, llm_predictor=llm_predictor, prompt_helper=prompt_helper)
+    # output_blob = output_bucket.blob(f"{output_prefix}index_{datetime.now():%Y-%m-%d_%H:%M:%S}.json")
+    # index = GPTSimpleVectorIndex(
+      #  documents, llm_predictor=llm_predictor, prompt_helper=prompt_helper)
+
+    # new code trying to add to an index
+    output_blob = output_bucket.blob(f"{output_prefix}index.json")
+    if output_blob.exists():
+        index = GPTSimpleVectorIndex.load_from_string(output_blob.download_as_string())
+        for doc in documents:
+            index.insert(doc)
+    else:
+        index = GPTSimpleVectorIndex([])
+        for doc in documents:
+            index.insert(doc)
 
     index_str = index.save_to_string()
     output_blob.upload_from_string(index_str)
