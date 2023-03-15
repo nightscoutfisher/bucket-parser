@@ -66,7 +66,6 @@ def parse_bucket(cloud_event):
     
     match file_ext:
         case "txt":
-            # print(bt)
             new_name = f"{user_dir_name}/index_source/{file_name}"
             copy_blob(bucket, name, bucket, new_name,)
             delete_blob(bucket, name)            
@@ -76,9 +75,7 @@ def parse_bucket(cloud_event):
             df = pd.read_csv(s)
             print(df)
         case "pdf":
-            # async_detect_document(gs_input_file_URI, gs_ocr_results_URI)
             async_detect_document(gs_input_file_URI, gs_index_source_URI)
-            # write_to_text(gs_ocr_results_URI)
             delete_blob(bucket, name)
         case _:
             print(f"File type not handled")
@@ -117,45 +114,7 @@ def async_detect_document(gcs_source_uri, gcs_destination_uri):
         requests=[async_request])
 
     print('Waiting for the operation to finish.')
-    operation.result(timeout=420)
-
-def write_to_text(gcs_destination_uri):
-    # Once the request has completed and the output has been
-    # written to GCS, we can list all the output files.
-    storage_client = storage.Client()
-
-    match = re.match(r'gs://([^/]+)/(.+)', gcs_destination_uri)
-    bucket_name = match.group(1)
-    prefix = match.group(2)
-
-    bucket = storage_client.get_bucket(bucket_name)
-
-    # List objects with the given prefix, filtering out folders.
-    blob_list = [blob for blob in list(bucket.list_blobs(
-        prefix=prefix)) if not blob.name.endswith('/')]
-    print('Output files:')
-    for blob in blob_list:
-        print(blob.name)
-
-    # Process the first output file from GCS.
-    # Since we specified batch_size=2, the first response contains
-    # the first two pages of the input file.
-    output = blob_list[0]
-
-    json_string = output.download_as_string()
-    response = json.loads(json_string)
-
-    # The actual response for the first page of the input file.
-    first_page_response = response['responses'][0]
-    annotation = first_page_response['fullTextAnnotation']
-
-    # Here we print the full text from the first page.
-    # The response contains more information:
-    # annotation/pages/blocks/paragraphs/words/symbols
-    # including confidence scores and bounding boxes
-    print('Full text:\n')
-    print(annotation['text'])
-
+    operation.result(timeout=300)
 
 def construct_index(gcs_uri_input, gcs_uri_output):
     # set maximum input size
@@ -178,26 +137,8 @@ def construct_index(gcs_uri_input, gcs_uri_output):
     match = re.match(r'gs://([^/]+)/(.+)', gcs_uri_input)
     bucket_name = match.group(1)
     prefix = match.group(2)
-
-    print("bucket_name: " + bucket_name)
-    print("prefix: " + prefix)
-
     bucket = storage_client.get_bucket(bucket_name)
 
-
-    # read through input files and create a list of text/str objects
-    blob_list = [blob for blob in list(bucket.list_blobs(
-        prefix=prefix)) if not blob.name.endswith('/')]
-    print("Full List of Input: ")
-    text_list = []
-    for blob in blob_list:
-        print(blob.name)
-        # documents = documents + blob.download_as_string().decode()
-        text_list.append(blob.download_as_string().decode())
-        delete_blob(bucket_name, blob.name)
-
-    # combine text list into document
-    documents = [Document(t) for t in text_list]
 
     # find output bucket info
     match = re.match(r'gs://([^/]+)/(.+)', gcs_uri_output)
@@ -205,24 +146,35 @@ def construct_index(gcs_uri_input, gcs_uri_output):
     output_prefix = match.group(2)
     output_bucket = storage_client.get_bucket(output_bucket_name)
 
-    # create datetime stamped output file
-    # output_blob = output_bucket.blob(f"{output_prefix}index_{datetime.now():%Y-%m-%d_%H:%M:%S}.json")
-    # index = GPTSimpleVectorIndex(
-      #  documents, llm_predictor=llm_predictor, prompt_helper=prompt_helper)
 
-    # new code trying to add to an index
-    output_blob = output_bucket.blob(f"{output_prefix}index.json")
-    if output_blob.exists():
-        index = GPTSimpleVectorIndex.load_from_string(output_blob.download_as_string())
-        for doc in documents:
-            index.insert(doc)
-    else:
-        index = GPTSimpleVectorIndex([])
-        for doc in documents:
-            index.insert(doc)
+    # read through input files and create a list of text/str objects
+    blob_list = [blob for blob in list(bucket.list_blobs(
+        prefix=prefix)) if not blob.name.endswith('/')]
+    text_list = []
+    i = 0
+    for blob in blob_list:
+        print(blob.name)
+        output_blob = output_bucket.blob(f"{output_prefix}index.json")
 
-    index_str = index.save_to_string()
-    output_blob.upload_from_string(index_str)
+        if output_blob.exists(): index = GPTSimpleVectorIndex.load_from_string(output_blob.download_as_string())
+        else: index = GPTSimpleVectorIndex([])
+   
+        doc = blob.download_as_string().decode()
+        print("Inserting doc",i)
+        index.insert(Document(doc))
+
+        print("saving index to str")
+        index_str = index.save_to_string()
+
+        print("str len = ", len(index_str))
+        output_blob.upload_from_string(index_str)
+        print("done saving")
+
+        i +=1
+        delete_blob(bucket_name, blob.name)
+
+    # combine text list into document
+    # documents = [Document(t) for t in text_list]
 
 
 def copy_blob(
