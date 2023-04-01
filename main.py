@@ -146,6 +146,7 @@ def construct_index(gcs_uri_input, gcs_uri_output):
     output_prefix = match.group(2)
     output_bucket = storage_client.get_bucket(output_bucket_name)
 
+    print("DETERMINED IN AND OUT BUCKETS")
 
     # read through input files and create a list of text/str objects
     blob_list = [blob for blob in list(bucket.list_blobs(
@@ -153,12 +154,19 @@ def construct_index(gcs_uri_input, gcs_uri_output):
     text_list = []
     i = 0
     for blob in blob_list:
-        print(blob.name)
+        print("INSIDE BLOB LIST LOOP")
         output_blob = output_bucket.blob(f"{output_prefix}index.json")
+        print(f"OUTPUT PREFIX {output_prefix}")
 
-        if output_blob.exists(): index = GPTSimpleVectorIndex.load_from_string(output_blob.download_as_string())
-        else: index = GPTSimpleVectorIndex([])
-   
+        if output_blob.exists(): 
+            print("INDEX EXISTS")
+            index = GPTSimpleVectorIndex.load_from_string(output_blob.download_as_string())
+            print("SUCCESSFULLY LOADED INDEX")
+        else: 
+            print("INDEX DOESN'T EXISTS")
+            index = GPTSimpleVectorIndex([])
+
+        print("decoding ", blob.name)
         doc = blob.download_as_string().decode()
         print("Inserting doc",i)
         index.insert(Document(doc))
