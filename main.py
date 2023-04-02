@@ -148,41 +148,34 @@ def construct_index(gcs_uri_input, gcs_uri_output):
 
     print("DETERMINED IN AND OUT BUCKETS")
 
-    # read through input files and create a list of text/str objects
+    # load index (in future chuck this up, maybe?)
+    output_blob = output_bucket.blob(f"{output_prefix}index.json")
+    if output_blob.exists(): 
+        print("INDEX EXISTS")
+        index = GPTSimpleVectorIndex.load_from_string(output_blob.download_as_string())
+        print("SUCCESSFULLY LOADED INDEX")
+    else: 
+        print("INDEX DOESN'T EXISTS")
+        index = GPTSimpleVectorIndex([])
+
+    # read through input files and add them to the index 
     blob_list = [blob for blob in list(bucket.list_blobs(
         prefix=prefix)) if not blob.name.endswith('/')]
-    text_list = []
-    i = 0
     for blob in blob_list:
-        print("INSIDE BLOB LIST LOOP")
-        output_blob = output_bucket.blob(f"{output_prefix}index.json")
-        print(f"OUTPUT PREFIX {output_prefix}")
+        print("Processing blob", blob.name)
 
-        if output_blob.exists(): 
-            print("INDEX EXISTS")
-            index = GPTSimpleVectorIndex.load_from_string(output_blob.download_as_string())
-            print("SUCCESSFULLY LOADED INDEX")
-        else: 
-            print("INDEX DOESN'T EXISTS")
-            index = GPTSimpleVectorIndex([])
-
-        print("decoding ", blob.name)
         doc = blob.download_as_string().decode()
-        print("Inserting doc",i)
+        print("Inserting doc")
         index.insert(Document(doc))
 
         print("saving index to str")
         index_str = index.save_to_string()
 
-        print("str len = ", len(index_str))
         output_blob.upload_from_string(index_str)
         print("done saving")
 
-        i +=1
         delete_blob(bucket_name, blob.name)
 
-    # combine text list into document
-    # documents = [Document(t) for t in text_list]
 
 
 def copy_blob(
